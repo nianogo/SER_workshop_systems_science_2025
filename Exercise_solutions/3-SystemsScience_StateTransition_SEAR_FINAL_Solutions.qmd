@@ -1,0 +1,415 @@
+---
+title: "Systems Science Modeling and Simulation Methods for Epidemiologic Research: A Tutorial"
+author: "Roch Nianogo & Ashley Buchanan"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    toc_float: true
+    df_print: kable
+    mathjax: default
+    number_sections: true
+    theme: lumen
+    highlight: tango
+    
+  pdf:
+    documentclass: article
+    toc: true               
+    number-sections: true   
+    geometry: "margin=1in"  
+---
+
+# 2) State Transition Model (STM)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load necessary libraries
+library(knitr)
+
+# Set global options to render all tables using kable
+options(knitr.table.format = "pipe")
+```
+
+```{r packages}
+if (!require("pacman")){
+  install.packages("pacman", repos = 'http://cran.us.r-project.org')
+}
+
+pacman::p_load("tidyverse",
+               "broom",
+               "here",
+               "ggdag",
+               "glue",
+               "diagram")
+```
+
+|   | Susceptible (S) | Exposed (E) | Adopted (A) | Reduced weight (R) |
+|----|----|----|----|----|
+| Susceptible (S) | p_SS | p_SE | p_SA | p_SR |
+| Exposed (E) | 0 | p_EE | p_EA | p_ER |
+| Adopted (A) | 0 | 0 | p_AA | p_AR |
+| Reduced weight (R) | 0 | 0 | 0 | p_RR |
+
+-   `p_SS`: Probability of remaining susceptible.
+
+-   `p_SE`: Probability of moving from susceptible to exposed.
+
+-   `p_SA`: Probability of moving from susceptible to adopting a behavior.
+
+-   `p_SR`: Probability of moving from susceptible to reduced weight.
+
+-   `p_EE`: Probability of remaining in an exposed state.
+
+-   `p_EA`: Probability of moving from exposed to adopting a behavior.
+
+-   `p_ER`: Probability of moving from exposed to reduced weight.
+
+-   `p_AA`: Probability of remaining in an adopted behavior state.
+
+-   `p_AR`: Probability of moving from behavior adopted to reduced weight.
+
+-   `p_RR`: Probability of remaining in a reduced weight state.
+
+```{r}
+
+
+p_se = 0.012  # Probability of moving from S to E (probability of being exposed to an intervention)
+#Probability of moving from susceptible to exposed.
+p_sa = 0.003  # Probability of moving from S to A (probability of adopting a behavior)
+#Probability of moving from susceptible to adopting a behavior.
+p_sr = 0.001  # Probability of moving from S to R (probability of being in reduced weight state)
+#Probability of moving from susceptible to reduced weight.
+p_ea = 0.008  # Probability of moving from E to A (probability of adopting a behavior)
+#Probability of mving from exposed to adopted behavior
+p_er = 0.0005 # Probability of moving from E to R (probability of having a reduced weight)
+#Probability of moving from exposed  to reduced weight
+p_ar = 0.003  # Probability of moving from A to R (probability of having a reduced weight)
+#Probability of moving from behavior adopted to reduced weight
+p_rr = 1      # Probability of staying in the reduced weight state (must be one, absorbing state)
+
+# Calculate complementary probabilities
+p_ss = 1 - p_se - p_sa - p_sr  # Probability of staying in S
+p_ee = 1 - p_ea - p_er         # Probability of staying in E
+p_aa = 1 - p_ar                # Probability of staying in A
+
+transition_mat=matrix(c(p_ss, p_se, p_sa, p_sr,
+                        0,    p_ee, p_ea, p_er,  # Transitions from state S
+                        0,    0,    p_aa, p_ar,  # Transitions from state A
+                        0,    0,       0, p_rr), # Transitions from state R
+                byrow = TRUE,
+                nrow = 4)
+
+#transition matrix does not depend on time (does not depend on time)
+transition_mat
+
+#check that rows sum to 1
+rowSums(transition_mat)
+
+colnames(transition_mat) <- rownames(transition_mat) <- c("S", "E", "A", "R")
+
+
+##### Plot transition matrix
+plotmat(A = t(transition_mat), pos = 4, curve = 0.4, name = rownames(transition_mat),
+        lwd = 2, arr.len = 0.3, arr.width = 0.1, my = 0.1, shadow.size = 0,
+        box.size = 0.05, arr.type = "triangle", dtext = -0.8,
+        main = "Transition Matrix")
+
+
+#to compute the probabilities for each time
+
+stm_simulation <- function(initial_state_vec, 
+                           transition_prob_mat, 
+                           n_cycles){
+  x <- matrix(NA, 
+              ncol = length(initial_state_vec), 
+              nrow = n_cycles) # Initialize Markov trace
+  
+  x <- rbind(initial_state_vec, x) # Markov trace at cycle 0 is initial state vector
+  
+  colnames(x) <- colnames(transition_prob_mat) # Columns are the states
+  rownames(x) <- 0:n_cycles # Rows are the model cycles
+  
+  for (t in 1:n_cycles){ # Simulating state vectors at each cycle with for loop
+    
+    x[t + 1, ] <- x[t, ] %*% transition_prob_mat
+  }
+  
+  return(x)
+}
+
+
+##  simulate markov-chain
+time = 365     #day intervals
+transition_mat #time invariant
+
+#P(E)=0.05 initially exposed and P(A)=0.02 initially adopted
+#Ensure the probabilities sum to 1
+initial_states = c(S=0.93,E=0.05,A=0.02, R=0)
+
+stm <- stm_simulation(initial_state_vec=initial_states, 
+                      transition_prob_mat=transition_mat, 
+                      n_cycles = time)
+
+stm1 <- stm %>% 
+  as.data.frame() %>% 
+  rowid_to_column("time_steps") %>% 
+  mutate(time_steps=time_steps-1)
+stm1
+
+### Figure  
+
+#Y-axis: Probability
+stm1 %>% 
+  ggplot()+
+  geom_line(aes(time_steps,S,color="1. Susceptible"))+
+  geom_line(aes(time_steps,E,color="2. Exposed"))+
+  geom_line(aes(time_steps,A,color="3. Adopted"))+
+  geom_line(aes(time_steps,R,color="4. Reduced_weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="State Transition Model output main scenario",
+       y    = "Probability of different states",
+       x    ="Days",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+#Y-axis: Number of people
+stm1_people <- stm1
+stm1_people$S <- stm1$S*10^4
+stm1_people$E <- stm1$E*10^4
+stm1_people$A <- stm1$A*10^4
+stm1_people$R <- stm1$R*10^4
+
+stm1_people %>% 
+  ggplot()+
+  geom_line(aes(time_steps,S,color="1. Susceptible"))+
+  geom_line(aes(time_steps,E,color="2. Exposed"))+
+  geom_line(aes(time_steps,A,color="3. Adopted"))+
+  geom_line(aes(time_steps,R,color="4. Reduced_weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="State Transition Model output main scenario",
+       y    = "Individuals (total)",
+       x    ="Days",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+
+```
+
+```{r}
+
+#Exercises: #(1) Modify the code so it is possible to have a 5% background probability of weight reduction (moving from susceptible to reduced weight without the intervention). Let this reduce the probability of transition from susceptible to susceptible to ensure the rows of the transition matrix sum to 1. How does this change the model results? 
+
+
+#Probability of moving from susceptible to adopting a behavior.
+#this is the background weight loss probability (in absence of intervention)
+p_sr = 0.05  # Probability of moving from S to R (probability of being in reduced weight state)
+#keep all other probabilities the same
+
+# Calculate complementary probabilities
+# Ensure that the probabilites across the row sum to 1
+p_ss = 1 - p_se - p_sa - p_sr  # Probability of staying in S
+
+
+transition_mat=matrix(c(p_ss, p_se, p_sa, p_sr,
+                        0,    p_ee, p_ea, p_er,  # Transitions from state S
+                        0,    0,    p_aa, p_ar, # Transitions from state A
+                        0,    0,       0, p_rr),       # Transitions from state R
+                byrow = TRUE,
+                nrow = 4)
+
+colnames(transition_mat) <- rownames(transition_mat) <- c("S", "E", "A", "R")
+#transition matrix does not depend on time (does not depend on time)
+transition_mat
+
+#check that rows sum to 1
+rowSums(transition_mat)
+
+
+
+##  simulate markov-chain
+stm2 <- stm_simulation(initial_state_vec=initial_states, 
+                      transition_prob_mat=transition_mat, 
+                      n_cycles = time)
+
+stm2 <- stm2 %>% 
+  as.data.frame() %>% 
+  rowid_to_column("time_steps") %>% 
+  mutate(time_steps=time_steps-1)
+stm2
+
+### Figure  
+
+#Y-axis: Probability
+stm2 %>% 
+  ggplot()+
+  geom_line(aes(time_steps,S,color="1. Susceptible"))+
+  geom_line(aes(time_steps,E,color="2. Exposed"))+
+  geom_line(aes(time_steps,A,color="3. Adopted"))+
+  geom_line(aes(time_steps,R,color="4. Reduced_weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="State Transition Model output 5% background weight reduction",
+       y    = "Probability of different states",
+       x    ="Days",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+#Solution: The recovered curve increases much more quickly, while a small proportion of the population exposed or adopted the intervention.
+
+```
+
+```{r}
+
+#(2) Using the original transition probabilities (rerun example code above for these settings), modify the code so that there are 10% exposed and 5% adopted initially in the model. How does this change the model results? 
+
+#P(E)=0.10 initially exposed and P(A)=0.05 initially adopted
+#Ensure the probabilities sum to one by reducing the proportion in the S state
+
+initial_states = c(S=0.85,E=0.10,A=0.05, R=0)
+
+stm3 <- stm_simulation(initial_state_vec=initial_states, 
+                      transition_prob_mat=transition_mat, 
+                      n_cycles = time)
+
+stm3 <- stm3 %>% 
+  as.data.frame() %>% 
+  rowid_to_column("time_steps") %>% 
+  mutate(time_steps=time_steps-1)
+stm3
+
+### Figure  
+
+#Y-axis: Probability
+stm3 %>% 
+  ggplot()+
+  geom_line(aes(time_steps,S,color="1. Susceptible"))+
+  geom_line(aes(time_steps,E,color="2. Exposed"))+
+  geom_line(aes(time_steps,A,color="3. Adopted"))+
+  geom_line(aes(time_steps,R,color="4. Reduced_weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="State Transition Model output - different starting probabilities",
+       y    = "Probability of different states",
+       x    ="Days",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+#Solution: Changing these probabilities shifted the starting point for the exposed and adopted curves. Otherwise, the curves look similar to the main scenario.
+```
+
+```{r}
+#(3) Use the original transition probabilities by rerunning the example code. Vary the probability of transition from susceptible to exposed to half of the original value, then also double. In each case, let this reduce the probability of transition from susceptible to susceptible to ensure the rows of the transition matrix sum to 1. What happens to the output figure?
+
+#Reduce the transition from S to E by 50%
+
+p_se = 0.012*0.5  # Probability of moving from S to E (probability of being exposed to an intervention)
+
+# Calculate complementary probabilities
+p_ss = 1 - p_se - p_sa - p_sr  # Probability of staying in S
+
+transition_mat=matrix(c(p_ss, p_se, p_sa, p_sr,
+                        0,    p_ee, p_ea, p_er, # Transitions from state S
+                        0,    0,    p_aa, p_ar, # Transitions from state A
+                        0,    0,       0, p_rr),# Transitions from state R
+                byrow = TRUE,
+                nrow = 4)
+
+#transition matrix does not depend on time (does not depend on time)
+transition_mat
+
+#check that rows sum to 1
+rowSums(transition_mat)
+
+colnames(transition_mat) <- rownames(transition_mat) <- c("S", "E", "A", "R")
+
+
+stm4 <- stm_simulation(initial_state_vec=initial_states, 
+                      transition_prob_mat=transition_mat, 
+                      n_cycles = time)
+
+stm4 <- stm4 %>% 
+  as.data.frame() %>% 
+  rowid_to_column("time_steps") %>% 
+  mutate(time_steps=time_steps-1)
+stm4
+
+### Figure  
+
+#Y-axis: Probability
+stm4 %>% 
+  ggplot()+
+  geom_line(aes(time_steps,S,color="1. Susceptible"))+
+  geom_line(aes(time_steps,E,color="2. Exposed"))+
+  geom_line(aes(time_steps,A,color="3. Adopted"))+
+  geom_line(aes(time_steps,R,color="4. Reduced_weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="State Transition Model output probability of S to E halved",
+       y    = "Probability of different states",
+       x    ="Days",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+#Solution: When the transition probability from S to E is reduced by 50%, the exposed curve is flatter (slower increase) and the susceptible curve decreases more slowly. However, the other curves for exposed and adopted look similar to the main scenario.
+
+#Increase the transition from S to E by 200%
+
+p_se = 0.012*2  # Probability of moving from S to E (probability of being exposed to an intervention)
+
+# Calculate complementary probabilities
+p_ss = 1 - p_se - p_sa - p_sr  # Probability of staying in S
+
+transition_mat=matrix(c(p_ss, p_se, p_sa, p_sr,
+                        0,    p_ee, p_ea, p_er, # Transitions from state S
+                        0,    0,    p_aa, p_ar, # Transitions from state A
+                        0,    0,       0, p_rr),# Transitions from state R
+                byrow = TRUE,
+                nrow = 4)
+
+#transition matrix does not depend on time (does not depend on time)
+transition_mat
+
+#check that rows sum to 1
+rowSums(transition_mat)
+
+colnames(transition_mat) <- rownames(transition_mat) <- c("S", "E", "A", "R")
+
+
+stm5 <- stm_simulation(initial_state_vec=initial_states, 
+                      transition_prob_mat=transition_mat, 
+                      n_cycles = time)
+
+stm5 <- stm5 %>% 
+  as.data.frame() %>% 
+  rowid_to_column("time_steps") %>% 
+  mutate(time_steps=time_steps-1)
+stm4
+
+### Figure  
+
+#Y-axis: Probability
+stm5 %>% 
+  ggplot()+
+  geom_line(aes(time_steps,S,color="1. Susceptible"))+
+  geom_line(aes(time_steps,E,color="2. Exposed"))+
+  geom_line(aes(time_steps,A,color="3. Adopted"))+
+  geom_line(aes(time_steps,R,color="4. Reduced_weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="State Transition Model output probability of S to E double",
+       y    = "Probability of different states",
+       x    ="Days",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+#Solution:  When the transition probability from S to E is increased by 200%, the exposed curve is steeper and peaks more quickly and the susceptible curve decreases more quickly. However, the other curves for adopted and reduced weight look similar to the main scenario. 
+```

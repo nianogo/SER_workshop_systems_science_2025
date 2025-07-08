@@ -1,0 +1,115 @@
+---
+title: "Systems Science Modeling and Simulation Methods for Epidemiologic Research: A Tutorial"
+subtitle: "Introduction (Solutions)"
+author:
+  - name: Roch Nianogo & Ashley Buchanan
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    
+    toc: true
+    toc_float: true
+    df_print: kable
+    mathjax: default
+    number_sections: true
+    theme: lumen
+    highlight: tango
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center', cache = TRUE)
+
+#install my package if not yet installed
+if (!require("pacman"))
+  install.packages("pacman", repos = 'http://cran.us.r-project.org')
+
+pacman::p_load("tidyverse",                           #manipulate data
+               "contrast",
+               "magrittr",
+               "here",
+               "broom",
+               "msm") #the truncated normal distribution function
+```
+
+
+```{r}
+#1 Write code for a binomial distribution to match a normal distribution. What are the parameters for each?
+
+#SOLUTION: To match a binomial distribution to a normal distribution, you're typically trying to approximate the binomial with a normal distribution when the number of trials is large. mu = np and sigma^2 = np(1-p). This approximation works well when n is large and p is not too close to 0 or 1. 
+
+# Set binomial parameters
+n <- 1000
+p <- 0.3
+
+# Binomial mean and sd
+mu <- n * p
+sigma <- sqrt(n * p * (1 - p))
+
+# Simulate data
+set.seed(123)
+binom_sample <- rbinom(10000, size = n, prob = p)
+norm_sample  <- rnorm(10000, mean = mu, sd = sigma)
+
+# Plot comparison
+hist(binom_sample, breaks = 50, col = rgb(1,0,0,0.5), freq = FALSE, main = "Binomial vs Normal Approximation", xlab = "Value")
+hist(norm_sample, breaks = 50, col = rgb(0,0,1,0.5), freq = FALSE, add = TRUE)
+legend("topright", legend = c("Binomial", "Normal Approx"), fill = c(rgb(1,0,0,0.5), rgb(0,0,1,0.5)))
+
+```
+
+```{r}
+#2 What happens if you reset a random seed inside or outside of a loop in R? Please write sample code to demonstrate.
+
+#SOLUTION:
+
+#reset inside a loop:
+
+results <- numeric(5)
+for (i in 1:5) {
+  set.seed(42)  # Reset in every iteration
+  results[i] <- rnorm(1)
+}
+print(results)
+
+#the same number is produced for each iteration (due to same random starting point)
+
+#rest outside of a loop
+
+set.seed(42)
+results <- numeric(5)
+for (i in 1:5) {
+  results[i] <- rnorm(1)
+}
+print(results)
+
+#a different result is produced for each iteration because the random generator progresses
+```
+
+```{r}
+#3 You are analyzing a sample of patients living with HIV to determine whether their average CD4 cell count differs from a known reference value used in clinical guidelines. Simulate a sample of CD4 cell counts from 50 individuals from a normal distribution with mean 320 cells/mm3 and standard deviation 100 cells/mm3. Using the functions for the normal distribution in R, compute the sample mean, standard error and z-score. Return a two-sided p-value for a test of the null hypothesis H0: mu = 350 vs. H0: mu != 50. Use your function to calculate the p-value for testing whether the sample’s average CD4 count is significantly different from 350 cells/mm³. Report the p-value and state whether the difference is statistically significant at the 0.05 level.
+
+#SOLUTION
+
+set.seed(123)
+cd4_counts <- rnorm(50, mean = 320, sd = 100)
+
+#define function
+
+two_sided_pval <- function(x, mu0) {
+  x_bar <- mean(x)                        # Sample mean
+  se <- sd(x) / sqrt(length(x))          # Standard error
+  z <- (x_bar - mu0) / se                # Z-score
+  p <- 2 * (1 - pnorm(abs(z)))           # Two-sided p-value
+  return(p)
+}
+
+p_val <- two_sided_pval(cd4_counts, mu0 = 350)
+print(p_val)
+
+#> print(p_val)
+#[1] 0.04251769
+
+#At the 0.05 significance level, we reject the null hypothesis and conclude that the average CD4 cell count in our sample is signficiantly different from the population mean of 350 cells/mm3.
+```
+

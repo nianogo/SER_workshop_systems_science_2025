@@ -1,0 +1,805 @@
+---
+title: "Systems Science Modeling and Simulation Methods for Epidemiologic Research: A Tutorial"
+author: "Roch Nianogo & Ashley Buchanan"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    toc: true
+    toc_float: true
+    df_print: kable
+    mathjax: default
+    number_sections: true
+    theme: lumen
+    highlight: tango
+    
+  pdf:
+    documentclass: article
+    toc: true               
+    number-sections: true   
+    geometry: "margin=1in"  
+---
+
+# 4) Agent-Based Modeling (ABM)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load necessary libraries
+library(knitr)
+
+# Set global options to render all tables using kable
+options(knitr.table.format = "pipe")
+
+```
+
+```{r packages}
+if (!require("pacman")){
+  install.packages("pacman", repos = 'http://cran.us.r-project.org')
+}
+
+pacman::p_load("tidyverse",
+               "broom",
+               "here",
+               "ggdag",
+               "glue")
+```
+
+```{r}
+
+#Adapted from Source : Ed Boone Series
+#Note: This block of code will take some time to run (about 3.6 minutes)
+
+npop=10000 #population size
+ntime=365  #number of time steps (weeks, 1 year total)
+timelength = 1:ntime
+
+#function for baseline data
+#SEAR (susceptible, exposed, adopted, reduced weight)
+#npop: population size
+#e0: number exposed at baseline
+#a0: number adopted at baseline
+
+generate_agents_baseline <- function(npop, e0, a0){
+  # create a population of susceptible individuals
+  agents_data <- data.frame( agentno = 1:npop,
+                        state = "s",
+                        mixing = runif(npop,0,1), #probability of agent interacting with another agent
+                        time_e = 0,
+                        time_a = 0,
+                        stringsAsFactors = F) 
+  agents_data$state[1:e0] <- "e"                                              #e0 determines the number initially exposed at time 0
+  agents_data$time_e[1:(e0 +a0)] <- rbinom(n=(e0+a0), size=1, prob=0.5) + 1.  #this sets the time for agents initially exposed
+  agents_data$state[(e0+1):(e0 + a0)] <- "a"                                  #a0 determines the number initially adopted at time 0
+  agents_data$time_a[(e0+1):(e0 + a0)] <- rbinom(n=a0, size=21, prob=0.5) + 1 #this sets the time for agents initially adopted
+  return( agents_data ) 
+} 
+
+
+#Note: Can use Weibull or exponential distribution to set time for agents initially exposed or initially adopted
+#examples below
+
+# Weibull(k = 2.7, lambda=3.7) to match rbinom(size=5, prob=0.5) + 1 (Mean = 3.5, variance = 1.25)
+#agents_data$time_e[1:(e0 + a0)] <- ceiling(rweibull(n = (e0 + a0), shape = 2.7, scale = 3.7))
+# Weibull(k = 2.4, lambda=15.5) to match rbinom(size=26, prob=0.5) + 1 (Mean = 14, variance = 6.5)
+#agents_data$time_a[(e0 + 1):(e0 + a0)] <- ceiling(rweibull(n = a0, shape = 2.4, scale = 15.5))
+
+# Exponential(rate = 1/3.5) to match rbinom(size=5, prob=0.5) + 1 (Mean = 3.5, variance = 1.25)
+#agents_data$time_e[1:(e0 + a0)] <- ceiling(rexp(n = (e0 + a0), rate = 1 / 3.5))
+# Exponential(rate = 1/14) to match rbinom(size=26, prob=0.5) + 1 (Mean = 14, variance = 6.5)
+#agents_data$time_a[(e0 + 1):(e0 + a0)] <- ceiling(rexp(n = a0, rate = 1 / 14))
+  
+
+
+#these represent the 5 initial peer educators, and 2 of those exposed had already adopted
+agents_data <- generate_agents_baseline(npop=npop, e0 = 5, a0 = 2 )
+
+library("rmarkdown")
+paged_table(agents_data)
+
+#maxmin: maximum number of agents who mix (per day)
+#prob of transitions between states
+#s2e: prob of transition from susceptible to exposed
+#e2a: prob of transition from exposed to adopted
+#e2r: prob of transition from exposed to reduced weight
+#a2r: prob of transition from adopted to reduce weight
+
+param <- data.frame(maxmix = 3,
+                    s2e = 0.030,
+                    e2a = 0.046,
+                    e2r = 0.024,
+                    a2r = 0.034)
+param
+
+
+### Function & simulation  
+#function for running the ABM simulation
+#agents weight can decrease independent of exposure 
+#for now, allow background weight reduction (could depend on characteristics of agents)
+#exposure impacts adoption then weight reduction
+
+abm_sim <- function(agents_data, param, ntime){
+  npop <- nrow(agents_data)
+  
+  #create dataframe to store results
+  out <- data.frame(  s = rep( 0, ntime),
+                      e = rep( 0, ntime),
+                      a = rep( 0, ntime),
+                      r = rep( 0, ntime))
+  
+  # move the people through time.
+  for(t in 1:ntime){  
+    
+    # moving people through time.
+    state_s1   <- (1:npop)[agents_data$state == "s" ]
+    state_se1  <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" ]
+    state_sea1 <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" | agents_data$state == "a" ]
+    
+    for( i in state_s1 ){
+      # determine how likely the agent is to meet with others
+      mix1 <- agents_data$mixing[i]
+      
+      # how many agents will they meet
+      meet1 <- round(mix1*param$maxmix, 0 ) + 1
+      
+      # randomly samples the agents they will meet
+      # Here, we chose agents who have been exposed or adopted 
+      # These agents can train their contacts
+     
+      meet2 <- sample( state_sea1, 
+                       meet1, 
+                       replace = TRUE,
+                       prob = agents_data$mixing[state_sea1] )
+      
+      for( j in 1:length(meet2) ){
+        
+        # select agents they will meet
+        meet1a <- agents_data[meet2[j], ]
+        
+        # if agent's contact is exposed, then possibly change state for the agent exposed
+        # inverse transform method 
+        
+        if( meet1a$state == "e" ){
+          if( runif(1,0,1) < param$s2e ){
+            agents_data$state[i] <- "e"
+          }
+        }
+      }
+    }
+    
+    # Find those who have been exposed and increment time
+
+    state_e1 <- (1:npop)[agents_data$state == "e" ]
+    agents_data$time_e[state_e1] = agents_data$time_e[state_e1] + 1
+    
+    
+    # agent could move directly from exposed to weight loss 
+    # those exposed for 28 days could move weight loss (or remain in exposed)
+    state_e2 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 28] #28 days (4 weeks) to lose weight
+    
+    # randomly assign to move from exposed to weight loss
+     for( i in state_e2 ){
+      # randomly assign whether they get reduce weight or not
+      if( runif(1,0,1) < param$e2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    # Find those who were exposed and possibly move to adopted or weight loss
+    # after 3 weeks (21 days) for exposure to intervention
+    state_e3 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 21]
+    
+    for( i in state_e3 ){
+      # randomly assign whether they get adopt or not.
+      if( runif(1,0,1) < param$e2a ){
+        agents_data$state[i] <- "a"
+      }
+    }
+    
+    # update how long they have adopted (increment time)
+    state_a1 <- (1:npop)[agents_data$state == "a" ]
+    agents_data$time_a[state_a1] = agents_data$time_a[state_a1] + 1
+    
+    #those in adopted move to weight loss after 28 days (4 weeks) or stay adopted
+    state_a2 <- (1:npop)[agents_data$state == "a" &  agents_data$time_a >28]
+    
+    for( i in state_a2 ){
+      # randomly assign whether they get reduced weight or not
+      if( runif(1,0,1) < param$a2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    
+    #For those who stay in adopted, increment time
+    state_a3 <- (1:npop)[agents_data$state == "a" & agents_data$time_a <= 28] #28 days (4 weeks) for weight loss to occur
+    agents_data$time_a[state_a2] = agents_data$time_a[state_a2] + 1
+    agents_data$time_a[state_a3] = agents_data$time_a[state_a3] + 1
+    
+    #save output 
+    out$s[t] <- sum(agents_data$state == "s") 
+    out$e[t] <- sum(agents_data$state == "e") 
+    out$a[t] <- sum(agents_data$state == "a") 
+    out$r[t] <- sum(agents_data$state == "r") 
+  }
+  
+
+  return( out )
+}
+
+
+abm1 <- abm_sim(agents_data=agents_data, param=param, ntime = ntime)
+
+### Figure  
+
+p1 <- ggplot(data=abm1)+
+  geom_line(aes(timelength,s,color="1. Susceptible"))+
+  geom_line(aes(timelength,e,color="2. Exposed"))+
+  geom_line(aes(timelength,a,color="3. Adopted"))+
+  geom_line(aes(timelength,r,color="4. Reduced Weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="Agent-based model output",
+       y    ="Individuals (total)",
+       x    ="Day",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+p1
+```
+
+```{r}
+#Exercises:
+#(1) Modify the code above so that it takes 28 days to adopt (if exposed) and 48 days to lose weight if exposed/adopted. What happens to the output figure?
+
+#SOLUTION:
+
+#function for baseline data
+#SEAR (susceptible, exposed, adopted, reduced weight)
+#npop: population size
+#e0: number exposed at baseline
+#a0: number adopted at baseline
+
+generate_agents_baseline <- function(npop, e0, a0){
+  # create a population of susceptible individuals
+  agents_data <- data.frame( agentno = 1:npop,
+                        state = "s",
+                        mixing = runif(npop,0,1), #probability of agent interacting with another agent
+                        time_e = 0,
+                        time_a = 0,
+                        stringsAsFactors = F) 
+  agents_data$state[1:e0] <- "e"                                              #e0 determines the number initially exposed at time 0
+  agents_data$time_e[1:(e0 +a0)] <- rbinom(n=(e0+a0), size=1, prob=0.5) + 1   #this sets the time for agents initially exposed
+  agents_data$state[(e0+1):(e0 + a0)] <- "a"                                  #a0 determines the number initially adopted at time 0
+  agents_data$time_a[(e0+1):(e0 + a0)] <- rbinom(n=a0, size=28, prob=0.5) + 1 #this sets the time for agents initially adopted - change to 28 days
+  return( agents_data ) 
+} 
+
+
+
+#these represent the 5 initial peer educators, and 2 of those exposed had already adopted
+agents_data <- generate_agents_baseline(npop=npop, e0 = 5, a0 = 2 )
+
+#maxmin: maximum number of agents who mix (per days)
+#prob of transitions between states
+#s2e: prob of transition from susceptible to exposed
+#e2a: prob of transition from exposed to adopted
+#e2r: prob of transition from exposed to reduced weight
+#a2r: prob of transition from adopted to reduce weight
+
+param <- data.frame(maxmix = 3,
+                    s2e = 0.030,
+                    e2a = 0.046,
+                    e2r = 0.024,
+                    a2r = 0.034)
+param
+
+
+### Function & simulation  
+#function for running the ABM simulation
+#agents weight can decrease independent of exposure 
+#for now, allow background weight reduction (could depend on characteristics of agents)
+#exposure impacts adoption then weight reduction
+
+abm_sim <- function(agents_data, param, ntime){
+  npop <- nrow(agents_data)
+  
+  #create dataframe to store results
+  out <- data.frame(  s = rep( 0, ntime),
+                      e = rep( 0, ntime),
+                      a = rep( 0, ntime),
+                      r = rep( 0, ntime))
+  
+  # move the people through time.
+  for(t in 1:ntime){  
+    
+    # moving people through time.
+    state_s1   <- (1:npop)[agents_data$state == "s" ]
+    state_se1  <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" ]
+    state_sea1 <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" | agents_data$state == "a" ]
+    
+    for( i in state_s1 ){
+      # determine how likely the agent is to meet with others
+      mix1 <- agents_data$mixing[i]
+      
+      # how many agents will they meet
+      meet1 <- round(mix1*param$maxmix, 0 ) + 1
+      
+      # randomly samples the agents they will meet
+      # Here, we chose agents who have been exposed or adopted 
+      # These agents can train their contacts
+     
+      meet2 <- sample( state_sea1, 
+                       meet1, 
+                       replace = TRUE,
+                       prob = agents_data$mixing[state_sea1] )
+      
+      for( j in 1:length(meet2) ){
+        
+        # select agents they will meet
+        meet1a <- agents_data[meet2[j], ]
+        
+        # if agent's contact is exposed, then possibly change state for the agent exposed
+        # inverse transform method 
+        
+        if( meet1a$state == "e" ){
+          if( runif(1,0,1) < param$s2e ){
+            agents_data$state[i] <- "e"
+          }
+        }
+      }
+    }
+    
+    # Find those who have been exposed and increment time
+
+    state_e1 <- (1:npop)[agents_data$state == "e" ]
+    agents_data$time_e[state_e1] = agents_data$time_e[state_e1] + 1
+    
+    
+    # agent could move directly from exposed to weight loss 
+    # those exposed for 48 days could move weight loss (or remain in exposed)
+    state_e2 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 48] #48 days (~7 weeks) to lose weight
+    
+    # randomly assign to move from exposed to weight loss
+     for( i in state_e2 ){
+      # randomly assign whether they get reduce weight or not
+      if( runif(1,0,1) < param$e2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    # Find those who were exposed and possibly move to adopted or weight loss
+    # after 4 weeks (28 days) for exposure to intervention
+    state_e3 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 28]
+    
+    for( i in state_e3 ){
+      # randomly assign whether they get adopt or not.
+      if( runif(1,0,1) < param$e2a ){
+        agents_data$state[i] <- "a"
+      }
+    }
+    
+    # update how long they have adopted (increment time)
+    state_a1 <- (1:npop)[agents_data$state == "a" ]
+    agents_data$time_a[state_a1] = agents_data$time_a[state_a1] + 1
+    
+    #those in adopted move to weight loss after 48 days (~7 weeks) or stay adopted
+    state_a2 <- (1:npop)[agents_data$state == "a" &  agents_data$time_a >48]
+    
+    for( i in state_a2 ){
+      # randomly assign whether they get reduced weight or not
+      if( runif(1,0,1) < param$a2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    
+    #For those who stay in adopted, increment time
+    state_a3 <- (1:npop)[agents_data$state == "a" & agents_data$time_a <= 48] #48 days (~7 weeks) for weight loss to occur
+    agents_data$time_a[state_a2] = agents_data$time_a[state_a2] + 1
+    agents_data$time_a[state_a3] = agents_data$time_a[state_a3] + 1
+    
+    #save output 
+    out$s[t] <- sum(agents_data$state == "s") 
+    out$e[t] <- sum(agents_data$state == "e") 
+    out$a[t] <- sum(agents_data$state == "a") 
+    out$r[t] <- sum(agents_data$state == "r") 
+  }
+  
+
+  return( out )
+}
+
+
+abm2 <- abm_sim(agents_data=agents_data, param=param, ntime = ntime)
+
+### Figure  
+
+p2 <- ggplot(data=abm2)+
+  geom_line(aes(timelength,s,color="1. Susceptible"))+
+  geom_line(aes(timelength,e,color="2. Exposed"))+
+  geom_line(aes(timelength,a,color="3. Adopted"))+
+  geom_line(aes(timelength,r,color="4. Reduced Weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="Agent-based model output - 28 days to adopt, 48 days to reduce weight",
+       y    ="Individuals (total)",
+       x    ="Day",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+p2
+
+#SOLUTION: The exposed becomes more peaked because people are staying in that state longer (need 28 days for adopted or 48 days for reduced weight). The adopted curve also becomes more peaked because those in adopted cannot move to reduced weight unitl 48 days. The reduced weight curves shifts slightly to the right (later in time).
+```
+
+```{r}
+#(2) Modify the number of contacts per day to 20 contacts. What happens to the output figure? Be sure to regenerate the baseline data using the original specifications, so we can compare to the baseline scenario.
+
+#SOLUTION: Change number of contacts per day to 20 contacts
+#Rerun baseline data to reset to base scenario
+
+
+npop=10000 #population size
+ntime=365  #number of time steps (weeks, 1 year total)
+timelength = 1:ntime
+
+#function for baseline data
+#SEAR (susceptible, exposed, adopted, reduced weight)
+#npop: population size
+#e0: number exposed at baseline
+#a0: number adopted at baseline
+
+generate_agents_baseline <- function(npop, e0, a0){
+  # create a population of susceptible individuals
+  agents_data <- data.frame( agentno = 1:npop,
+                        state = "s",
+                        mixing = runif(npop,0,1), #probability of agent interacting with another agent
+                        time_e = 0,
+                        time_a = 0,
+                        stringsAsFactors = F) 
+  agents_data$state[1:e0] <- "e"                                              #e0 determines the number initially exposed at time 0
+  agents_data$time_e[1:(e0 +a0)] <- rbinom(n=(e0+a0), size=1, prob=0.5) + 1  #this sets the time for agents initially exposed
+  agents_data$state[(e0+1):(e0 + a0)] <- "a"                                  #a0 determines the number initially adopted at time 0
+  agents_data$time_a[(e0+1):(e0 + a0)] <- rbinom(n=a0, size=21, prob=0.5) + 1 #this sets the time for agents initially adopted
+  return( agents_data ) 
+} 
+
+
+
+#these represent the 5 initial peer educators, and 2 of those exposed had already adopted
+agents_data <- generate_agents_baseline(npop=npop, e0 = 5, a0 = 2 )
+
+library("rmarkdown")
+paged_table(agents_data)
+
+#maxmin: maximum number of agents who mix (per day)
+#prob of transitions between states
+#s2e: prob of transition from susceptible to exposed
+#e2a: prob of transition from exposed to adopted
+#e2r: prob of transition from exposed to reduced weight
+#a2r: prob of transition from adopted to reduce weight
+
+param <- data.frame(maxmix = 20,
+                    s2e = 0.030,
+                    e2a = 0.046,
+                    e2r = 0.024,
+                    a2r = 0.034)
+param
+
+
+### Function & simulation  
+#function for running the ABM simulation
+#agents weight can decrease independent of exposure 
+#for now, allow background weight reduction (could depend on characteristics of agents)
+#exposure impacts adoption then weight reduction
+
+abm_sim <- function(agents_data, param, ntime){
+  npop <- nrow(agents_data)
+  
+  #create dataframe to store results
+  out <- data.frame(  s = rep( 0, ntime),
+                      e = rep( 0, ntime),
+                      a = rep( 0, ntime),
+                      r = rep( 0, ntime))
+  
+  # move the people through time.
+  for(t in 1:ntime){  
+    
+    # moving people through time.
+    state_s1   <- (1:npop)[agents_data$state == "s" ]
+    state_se1  <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" ]
+    state_sea1 <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" | agents_data$state == "a" ]
+    
+    for( i in state_s1 ){
+      # determine how likely the agent is to meet with others
+      mix1 <- agents_data$mixing[i]
+      
+      # how many agents will they meet
+      meet1 <- round(mix1*param$maxmix, 0 ) + 1
+      
+      # randomly samples the agents they will meet
+      # Here, we chose agents who have been exposed or adopted 
+      # These agents can train their contacts
+     
+      meet2 <- sample( state_sea1, 
+                       meet1, 
+                       replace = TRUE,
+                       prob = agents_data$mixing[state_sea1] )
+      
+      for( j in 1:length(meet2) ){
+        
+        # select agents they will meet
+        meet1a <- agents_data[meet2[j], ]
+        
+        # if agent's contact is exposed, then possibly change state for the agent exposed
+        # inverse transform method 
+        
+        if( meet1a$state == "e" ){
+          if( runif(1,0,1) < param$s2e ){
+            agents_data$state[i] <- "e"
+          }
+        }
+      }
+    }
+    
+    # Find those who have been exposed and increment time
+
+    state_e1 <- (1:npop)[agents_data$state == "e" ]
+    agents_data$time_e[state_e1] = agents_data$time_e[state_e1] + 1
+    
+    
+    # agent could move directly from exposed to weight loss 
+    # those exposed for 28 days could move weight loss (or remain in exposed)
+    state_e2 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 28] #28 days (4 weeks) to lose weight
+    
+    # randomly assign to move from exposed to weight loss
+     for( i in state_e2 ){
+      # randomly assign whether they get reduce weight or not
+      if( runif(1,0,1) < param$e2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    # Find those who were exposed and possibly move to adopted or weight loss
+    # after 3 weeks (21 days) for exposure to intervention
+    state_e3 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 21]
+    
+    for( i in state_e3 ){
+      # randomly assign whether they get adopt or not.
+      if( runif(1,0,1) < param$e2a ){
+        agents_data$state[i] <- "a"
+      }
+    }
+    
+    # update how long they have adopted (increment time)
+    state_a1 <- (1:npop)[agents_data$state == "a" ]
+    agents_data$time_a[state_a1] = agents_data$time_a[state_a1] + 1
+    
+    #those in adopted move to weight loss after 28 days (4 weeks) or stay adopted
+    state_a2 <- (1:npop)[agents_data$state == "a" &  agents_data$time_a >28]
+    
+    for( i in state_a2 ){
+      # randomly assign whether they get reduced weight or not
+      if( runif(1,0,1) < param$a2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    
+    #For those who stay in adopted, increment time
+    state_a3 <- (1:npop)[agents_data$state == "a" & agents_data$time_a <= 28] #28 days (4 weeks) for weight loss to occur
+    agents_data$time_a[state_a2] = agents_data$time_a[state_a2] + 1
+    agents_data$time_a[state_a3] = agents_data$time_a[state_a3] + 1
+    
+    #save output 
+    out$s[t] <- sum(agents_data$state == "s") 
+    out$e[t] <- sum(agents_data$state == "e") 
+    out$a[t] <- sum(agents_data$state == "a") 
+    out$r[t] <- sum(agents_data$state == "r") 
+  }
+  
+
+  return( out )
+}
+
+abm3 <- abm_sim(agents_data=agents_data, param=param, ntime = ntime)
+
+### Figure  
+
+p3 <- ggplot(data=abm3)+
+  geom_line(aes(timelength,s,color="1. Susceptible"))+
+  geom_line(aes(timelength,e,color="2. Exposed"))+
+  geom_line(aes(timelength,a,color="3. Adopted"))+
+  geom_line(aes(timelength,r,color="4. Reduced Weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="Agent-based model output higher daily contact rate",
+       y    ="Individuals (total)",
+       x    ="Day",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+p3
+
+#SOLUTION: Once we increase the daily contact rate to 20, the curves are steeper and peak sooner than the main scenario with 3 contacts per day. The more mixing there is in the population, the more likely others are to be exposed to the intervention information, then possibly adopt and lose weight.
+```
+
+```{r}
+#(3) Vary the probability of transition from susceptible to exposed from 0.03 to 0.10. What happens to the output figure? Be sure to reset the weekly contact rate to 3 contacts.
+
+npop=10000 #population size
+ntime=365  #number of time steps (weeks, 1 year total)
+timelength = 1:ntime
+
+#function for baseline data
+#SEAR (susceptible, exposed, adopted, reduced weight)
+#npop: population size
+#e0: number exposed at baseline
+#a0: number adopted at baseline
+
+generate_agents_baseline <- function(npop, e0, a0){
+  # create a population of susceptible individuals
+  agents_data <- data.frame( agentno = 1:npop,
+                        state = "s",
+                        mixing = runif(npop,0,1), #probability of agent interacting with another agent
+                        time_e = 0,
+                        time_a = 0,
+                        stringsAsFactors = F) 
+  agents_data$state[1:e0] <- "e"                                              #e0 determines the number initially exposed at time 0
+  agents_data$time_e[1:(e0 +a0)] <- rbinom(n=(e0+a0), size=1, prob=0.5) + 1  #this sets the time for agents initially exposed
+  agents_data$state[(e0+1):(e0 + a0)] <- "a"                                  #a0 determines the number initially adopted at time 0
+  agents_data$time_a[(e0+1):(e0 + a0)] <- rbinom(n=a0, size=21, prob=0.5) + 1 #this sets the time for agents initially adopted
+  return( agents_data ) 
+} 
+
+
+
+#these represent the 5 initial peer educators, and 2 of those exposed had already adopted
+agents_data <- generate_agents_baseline(npop=npop, e0 = 5, a0 = 2 )
+
+library("rmarkdown")
+paged_table(agents_data)
+
+#maxmin: maximum number of agents who mix (per day)
+#prob of transitions between states
+#s2e: prob of transition from susceptible to exposed
+#e2a: prob of transition from exposed to adopted
+#e2r: prob of transition from exposed to reduced weight
+#a2r: prob of transition from adopted to reduce weight
+
+param <- data.frame(maxmix = 3,
+                    s2e = 0.100, #change the probability of transition from susceptible to exposed to 0.100
+                    e2a = 0.046,
+                    e2r = 0.024,
+                    a2r = 0.034)
+param
+
+
+### Function & simulation  
+#function for running the ABM simulation
+#agents weight can decrease independent of exposure 
+#for now, allow background weight reduction (could depend on characteristics of agents)
+#exposure impacts adoption then weight reduction
+
+abm_sim <- function(agents_data, param, ntime){
+  npop <- nrow(agents_data)
+  
+  #create dataframe to store results
+  out <- data.frame(  s = rep( 0, ntime),
+                      e = rep( 0, ntime),
+                      a = rep( 0, ntime),
+                      r = rep( 0, ntime))
+  
+  # move the people through time.
+  for(t in 1:ntime){  
+    
+    # moving people through time.
+    state_s1   <- (1:npop)[agents_data$state == "s" ]
+    state_se1  <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" ]
+    state_sea1 <- (1:npop)[agents_data$state == "s" | agents_data$state == "e" | agents_data$state == "a" ]
+    
+    for( i in state_s1 ){
+      # determine how likely the agent is to meet with others
+      mix1 <- agents_data$mixing[i]
+      
+      # how many agents will they meet
+      meet1 <- round(mix1*param$maxmix, 0 ) + 1
+      
+      # randomly samples the agents they will meet
+      # Here, we chose agents who have been exposed or adopted 
+      # These agents can train their contacts
+     
+      meet2 <- sample( state_sea1, 
+                       meet1, 
+                       replace = TRUE,
+                       prob = agents_data$mixing[state_sea1] )
+      
+      for( j in 1:length(meet2) ){
+        
+        # select agents they will meet
+        meet1a <- agents_data[meet2[j], ]
+        
+        # if agent's contact is exposed, then possibly change state for the agent exposed
+        # inverse transform method 
+        
+        if( meet1a$state == "e" ){
+          if( runif(1,0,1) < param$s2e ){
+            agents_data$state[i] <- "e"
+          }
+        }
+      }
+    }
+    
+    # Find those who have been exposed and increment time
+
+    state_e1 <- (1:npop)[agents_data$state == "e" ]
+    agents_data$time_e[state_e1] = agents_data$time_e[state_e1] + 1
+    
+    
+    # agent could move directly from exposed to weight loss 
+    # those exposed for 28 days could move weight loss (or remain in exposed)
+    state_e2 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 28] #28 days (4 weeks) to lose weight
+    
+    # randomly assign to move from exposed to weight loss
+     for( i in state_e2 ){
+      # randomly assign whether they get reduce weight or not
+      if( runif(1,0,1) < param$e2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    # Find those who were exposed and possibly move to adopted or weight loss
+    # after 3 weeks (21 days) for exposure to intervention
+    state_e3 <- (1:npop)[agents_data$state == "e" & agents_data$time_e > 21]
+    
+    for( i in state_e3 ){
+      # randomly assign whether they get adopt or not.
+      if( runif(1,0,1) < param$e2a ){
+        agents_data$state[i] <- "a"
+      }
+    }
+    
+    # update how long they have adopted (increment time)
+    state_a1 <- (1:npop)[agents_data$state == "a" ]
+    agents_data$time_a[state_a1] = agents_data$time_a[state_a1] + 1
+    
+    #those in adopted move to weight loss after 28 days (4 weeks) or stay adopted
+    state_a2 <- (1:npop)[agents_data$state == "a" &  agents_data$time_a >28]
+    
+    for( i in state_a2 ){
+      # randomly assign whether they get reduced weight or not
+      if( runif(1,0,1) < param$a2r ){
+        agents_data$state[i] <- "r"
+      }
+    }
+    
+    #For those who stay in adopted, increment time
+    state_a3 <- (1:npop)[agents_data$state == "a" & agents_data$time_a <= 28] #28 days (4 weeks) for weight loss to occur
+    agents_data$time_a[state_a2] = agents_data$time_a[state_a2] + 1
+    agents_data$time_a[state_a3] = agents_data$time_a[state_a3] + 1
+    
+    #save output 
+    out$s[t] <- sum(agents_data$state == "s") 
+    out$e[t] <- sum(agents_data$state == "e") 
+    out$a[t] <- sum(agents_data$state == "a") 
+    out$r[t] <- sum(agents_data$state == "r") 
+  }
+  
+
+  return( out )
+}
+
+abm4 <- abm_sim(agents_data=agents_data, param=param, ntime = ntime)
+
+### Figure  
+
+p4 <- ggplot(data=abm4)+
+  geom_line(aes(timelength,s,color="1. Susceptible"))+
+  geom_line(aes(timelength,e,color="2. Exposed"))+
+  geom_line(aes(timelength,a,color="3. Adopted"))+
+  geom_line(aes(timelength,r,color="4. Reduced Weight"))+
+  scale_y_continuous(labels = scales::comma)+
+  labs(title="Agent-based model output probability of S to E transition",
+       y    ="Individuals (total)",
+       x    ="Day",
+       color = "") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+p4
+
+#SOLUTION: In this scenario, the curve for exposed is shifted to the left and more peaked (almost all of the population is exposed within 50 days), resulting in shifts in the adopted and reduced weight curves to the left as well. Almost the entire population reduced weight by 200 days.
+```
